@@ -9,7 +9,7 @@ import { queryMany, queryOne } from '@/lib/db'
 export async function POST(request: NextRequest) {
   try {
     const authHeader = request.headers.get('authorization')
-    const isCron = authHeader === `Bearer ${process.env.CRON_SECRET}`
+    const isCron = !!process.env.CRON_SECRET && authHeader === `Bearer ${process.env.CRON_SECRET}`
 
     let orgId: string | null = null
     if (!isCron) {
