@@ -120,12 +120,13 @@ Turso.
 Losing row-level security has two consequences:
 
 - **No database access from the browser.** The Turso auth token grants full database
-  access and must never reach the client. `lib/supabase/client.ts` is deleted. The 3
+  access and must never reach the client. `lib/supabase/client.ts` is deleted. The 4
   client components that currently query the database directly move their writes to
   server endpoints:
   - `LocationsClient.tsx` — `locations` delete → new `DELETE /api/businesses/[id]`.
   - `SettingsClient.tsx` — `organizations` profile update → new `PATCH /api/org`.
   - `RequestsClient.tsx` — `request_templates` delete → new `DELETE /api/templates/[id]`.
+  - `AIReplyButton.tsx` — `reviews` reply save → new `PATCH /api/reviews/[id]/reply`.
   Browser behavior is unchanged; each becomes a `fetch` to the new endpoint.
 - **Application-level org scoping.** RLS previously enforced isolation automatically.
   Now every server query must explicitly filter by the caller's `org_id`. This becomes
@@ -169,7 +170,8 @@ to work. `NEXT_PUBLIC_APP_URL` is already present.
 - `db/schema.sql`, plus a one-off schema-load script
 - `app/api/auth/signin/route.ts`, `app/api/auth/signout/route.ts`
 - `app/api/businesses/[id]/route.ts` (DELETE), `app/api/org/route.ts` (PATCH),
-  `app/api/templates/[id]/route.ts` (DELETE)
+  `app/api/templates/[id]/route.ts` (DELETE),
+  `app/api/reviews/[id]/reply/route.ts` (PATCH)
 
 **Rewritten** (Supabase calls → Turso SQL)
 - `app/api/auth/callback/route.ts`
@@ -185,7 +187,7 @@ to work. `NEXT_PUBLIC_APP_URL` is already present.
 
 **Modified** (swap direct DB calls for `fetch`)
 - `app/auth/signin/page.tsx`, `SettingsClient.tsx`, `LocationsClient.tsx`,
-  `RequestsClient.tsx`
+  `RequestsClient.tsx`, `components/AIReplyButton.tsx`, `components/TopBar.tsx`
 
 **Deleted**
 - `lib/supabase/client.ts`, `lib/supabase/server.ts`, `lib/supabase/types.ts`
