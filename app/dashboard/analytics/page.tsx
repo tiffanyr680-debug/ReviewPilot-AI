@@ -1,4 +1,6 @@
-import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+import { getSession, getCurrentOrgId } from '@/lib/auth'
+import { queryMany, queryOne } from '@/lib/db'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { SentimentChart } from '@/components/SentimentChart'
@@ -11,15 +13,15 @@ export const dynamic = 'force-dynamic'
 type SentimentRow = { sentiment: 'positive' | 'neutral' | 'negative' | null; posted_at: string | null; rating: number | null }
 
 export default async function AnalyticsPage() {
-  const supabase = await createClient()
-  const { data: orgId } = await supabase.rpc('get_user_org_id')
+  const session = await getSession()
+  if (!session) redirect('/auth/signin')
+  const orgId = await getCurrentOrgId(session.userId)
   if (!orgId) return <p className="text-sm text-gray-500">Loading…</p>
 
-  const { data: sub } = await supabase
-    .from('subscriptions')
-    .select('plan')
-    .eq('org_id', orgId)
-    .maybeSingle()
+  const sub = await queryOne<{ plan: string }>(
+    'SELECT plan FROM subscriptions WHERE org_id = ?',
+    [orgId],
+  )
   const plan = (sub?.plan ?? 'starter') as 'starter' | 'pro' | 'agency'
   const limits = getTierLimits(plan)
 
@@ -27,16 +29,15 @@ export default async function AnalyticsPage() {
     return <SentimentLocked currentPlan={plan} />
   }
 
-  // Pull last 90 days of reviews
   const ninetyDaysAgo = new Date()
   ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90)
 
-  const { data: reviews } = await supabase
-    .from('reviews')
-    .select('sentiment, posted_at, rating')
-    .eq('org_id', orgId)
-    .gte('posted_at', ninetyDaysAgo.toISOString())
-    .order('posted_at', { ascending: true })
+  const reviews = await queryMany<SentimentRow>(
+    `SELECT sentiment, posted_at, rating FROM reviews
+      WHERE org_id = ? AND posted_at >= ?
+      ORDER BY posted_at ASC`,
+    [orgId, ninetyDaysAgo.toISOString()],
+  )
 
   const rows = (reviews ?? []) as SentimentRow[]
 

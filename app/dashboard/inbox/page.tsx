@@ -1,30 +1,37 @@
-import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+import { getSession, getCurrentOrgId } from '@/lib/auth'
+import { queryMany, queryOne } from '@/lib/db'
 import { InboxClient } from './InboxClient'
-import type { Review } from '@/lib/supabase/types'
+import type { Review } from '@/lib/db-types'
 
 export const dynamic = 'force-dynamic'
 
 export default async function InboxPage() {
-  const supabase = await createClient()
-  const { data: orgId } = await supabase.rpc('get_user_org_id')
+  const session = await getSession()
+  if (!session) redirect('/auth/signin')
+  const orgId = await getCurrentOrgId(session.userId)
   if (!orgId) return <p className="text-sm text-gray-500">Loading…</p>
 
-  const [{ data: reviews }, { data: org }, { data: locations }] = await Promise.all([
-    supabase
-      .from('reviews')
-      .select('*')
-      .eq('org_id', orgId)
-      .order('posted_at', { ascending: false, nullsFirst: false })
-      .limit(200),
-    supabase.from('organizations').select('brand_voice').eq('id', orgId).maybeSingle(),
-    supabase.from('locations').select('id, name').eq('org_id', orgId),
+  const [reviews, org, locations] = await Promise.all([
+    queryMany<Review>(
+      'SELECT * FROM reviews WHERE org_id = ? ORDER BY posted_at DESC NULLS LAST LIMIT 200',
+      [orgId],
+    ),
+    queryOne<{ brand_voice: string | null }>(
+      'SELECT brand_voice FROM organizations WHERE id = ?',
+      [orgId],
+    ),
+    queryMany<{ id: string; name: string }>(
+      'SELECT id, name FROM locations WHERE org_id = ?',
+      [orgId],
+    ),
   ])
 
   return (
     <InboxClient
-      initialReviews={(reviews ?? []) as Review[]}
+      initialReviews={reviews}
       brandVoice={org?.brand_voice ?? 'Friendly and professional.'}
-      locations={locations ?? []}
+      locations={locations}
     />
   )
 }
