@@ -66,3 +66,24 @@ export async function sendNegativeReviewAlert(
     `,
   })
 }
+
+export async function sendMagicLinkEmail(to: string, signInLink: string): Promise<void> {
+  const resend = getResend()
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: 'Your ReviewPilot AI sign-in link',
+    html: `
+      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #0F172A;">Sign in to ReviewPilot AI</h2>
+        <p>Click the button below to sign in. This link expires in 15 minutes and can be used once.</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${signInLink}" style="background-color: #10b981; color: white; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-weight: bold;">
+            Sign in
+          </a>
+        </div>
+        <p style="color: #64748b; font-size: 14px;">If you didn't request this, you can safely ignore this email.</p>
+      </div>
+    `,
+  })
+}
