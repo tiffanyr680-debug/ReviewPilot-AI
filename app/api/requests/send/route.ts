@@ -1,28 +1,25 @@
-import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { SendRequestSchema } from '@/lib/validators'
-import { getTierLimits } from '@/lib/utils'
-import type { Plan } from '@/lib/utils'
+import { getTierLimits, type Plan } from '@/lib/utils'
 import { sendReviewRequestEmail } from '@/lib/email'
 import { sendReviewRequestSMS } from '@/lib/sms'
+import { getSession, getCurrentOrgId, newId } from '@/lib/auth'
+import { queryOne, execute, count } from '@/lib/db'
+import type { RequestTemplate, Location } from '@/lib/db-types'
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createClient()
-
-    // 1. Authenticate user and get org_id
-    const { data: { session }, error: sessionError } = await supabase.auth.getSession()
-    if (sessionError || !session) {
+    const session = await getSession()
+    if (!session) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const { data: orgId, error: orgError } = await supabase.rpc('get_user_org_id')
-    if (orgError || !orgId) {
+    const orgId = await getCurrentOrgId(session.userId)
+    if (!orgId) {
       return NextResponse.json({ error: 'Organization not found' }, { status: 404 })
     }
 
-    // 2. Validate body
     let body: unknown
     try {
       body = await request.json()
@@ -34,38 +31,30 @@ export async function POST(request: NextRequest) {
     if (!parsed.success) {
       return NextResponse.json(
         { error: 'Validation failed', details: parsed.error.flatten() },
-        { status: 422 }
+        { status: 422 },
       )
     }
 
-    const { customer_name, customer_phone, customer_email, template_id, location_id } = parsed.data
+    const { customer_name, customer_phone, customer_email, template_id, location_id } =
+      parsed.data
 
-    // 3. Check subscription limits
-    const { data: subscription } = await supabase
-      .from('subscriptions')
-      .select('plan, status')
-      .eq('org_id', orgId)
-      .single()
-
+    const subscription = await queryOne<{ plan: string }>(
+      'SELECT plan FROM subscriptions WHERE org_id = ?',
+      [orgId],
+    )
     const plan = (subscription?.plan ?? 'starter') as Plan
     const limits = getTierLimits(plan)
 
-    // Count requests sent this calendar month
     const startOfMonth = new Date()
     startOfMonth.setDate(1)
     startOfMonth.setHours(0, 0, 0, 0)
 
-    const { count: monthlyCount, error: countError } = await supabase
-      .from('review_requests')
-      .select('id', { count: 'exact', head: true })
-      .eq('org_id', orgId)
-      .gte('sent_at', startOfMonth.toISOString())
+    const monthlyCount = await count(
+      'SELECT COUNT(*) AS c FROM review_requests WHERE org_id = ? AND sent_at >= ?',
+      [orgId, startOfMonth.toISOString()],
+    )
 
-    if (countError) {
-      return NextResponse.json({ error: 'Failed to check request count' }, { status: 500 })
-    }
-
-    if (plan !== 'agency' && (monthlyCount ?? 0) >= limits.requestsPerMonth) {
+    if (plan !== 'agency' && monthlyCount >= limits.requestsPerMonth) {
       return NextResponse.json(
         {
           error: 'Monthly request limit reached',
@@ -73,40 +62,30 @@ export async function POST(request: NextRequest) {
           current_count: monthlyCount,
           limit: limits.requestsPerMonth,
         },
-        { status: 403 }
+        { status: 403 },
       )
     }
 
-    // 4. Fetch template (must belong to org)
-    const { data: template, error: templateError } = await supabase
-      .from('request_templates')
-      .select('*')
-      .eq('id', template_id)
-      .eq('org_id', orgId)
-      .single()
-
-    if (templateError || !template) {
+    const template = await queryOne<RequestTemplate>(
+      'SELECT * FROM request_templates WHERE id = ? AND org_id = ?',
+      [template_id, orgId],
+    )
+    if (!template) {
       return NextResponse.json({ error: 'Template not found' }, { status: 404 })
     }
 
-    // 5. Fetch location (must belong to org)
-    const { data: location, error: locationError } = await supabase
-      .from('locations')
-      .select('*')
-      .eq('id', location_id)
-      .eq('org_id', orgId)
-      .single()
-
-    if (locationError || !location) {
+    const location = await queryOne<Location>(
+      'SELECT * FROM locations WHERE id = ? AND org_id = ?',
+      [location_id, orgId],
+    )
+    if (!location) {
       return NextResponse.json({ error: 'Location not found' }, { status: 404 })
     }
 
-    // 6. Build review link
     const reviewLink = location.google_place_id
       ? `https://search.google.com/local/writereview?placeid=${location.google_place_id}`
       : `${process.env.NEXT_PUBLIC_APP_URL}/review/${location_id}`
 
-    // 7. Send SMS if phone provided and plan allows SMS
     if (customer_phone && limits.sms) {
       try {
         await sendReviewRequestSMS(
@@ -114,62 +93,51 @@ export async function POST(request: NextRequest) {
           customer_name,
           location.name,
           reviewLink,
-          template.sms_body ?? undefined
+          template.sms_body ?? undefined,
         )
       } catch (smsErr) {
         console.error('SMS send failed:', smsErr)
-        // Continue — don't block on SMS failure
       }
     }
 
-    // 8. Send email if email provided
     if (customer_email) {
       try {
-        await sendReviewRequestEmail(
-          customer_email,
-          customer_name,
-          location.name,
-          reviewLink
-        )
+        await sendReviewRequestEmail(customer_email, customer_name, location.name, reviewLink)
       } catch (emailErr) {
         console.error('Email send failed:', emailErr)
-        // Continue — don't block on email failure
       }
     }
 
-    // 9. Insert review_request record
-    const { data: reviewRequest, error: insertError } = await supabase
-      .from('review_requests')
-      .insert({
-        org_id: orgId,
+    const requestId = newId()
+    await execute(
+      `INSERT INTO review_requests
+         (id, org_id, location_id, template_id, customer_name, customer_phone, customer_email, status, sent_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'sent', ?)`,
+      [
+        requestId,
+        orgId,
         location_id,
         template_id,
         customer_name,
-        customer_phone: customer_phone ?? null,
-        customer_email: customer_email ?? null,
-        status: 'sent',
-        sent_at: new Date().toISOString(),
-      })
-      .select('id')
-      .single()
+        customer_phone ?? null,
+        customer_email ?? null,
+        new Date().toISOString(),
+      ],
+    )
 
-    if (insertError) {
-      console.error('review_requests insert error:', insertError)
-      return NextResponse.json({ error: 'Failed to record review request' }, { status: 500 })
-    }
+    await execute(
+      `INSERT INTO audit_logs (id, org_id, user_id, action, entity_type, entity_id, metadata)
+       VALUES (?, ?, ?, 'review_request_sent', 'review_request', ?, ?)`,
+      [
+        newId(),
+        orgId,
+        session.userId,
+        requestId,
+        JSON.stringify({ customer_name, location_id, template_id }),
+      ],
+    )
 
-    // 10. Insert audit log entry
-    await supabase.from('audit_logs').insert({
-      org_id: orgId,
-      user_id: session.user.id,
-      action: 'review_request_sent',
-      entity_type: 'review_request',
-      entity_id: reviewRequest.id,
-      metadata: { customer_name, location_id, template_id },
-    })
-
-    // 11. Return success
-    return NextResponse.json({ success: true, request_id: reviewRequest.id })
+    return NextResponse.json({ success: true, request_id: requestId })
   } catch (err) {
     console.error('Unexpected error in POST /api/requests/send:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
