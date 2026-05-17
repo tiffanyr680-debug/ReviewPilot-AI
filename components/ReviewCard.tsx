@@ -4,7 +4,7 @@ import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { AIReplyButton } from '@/components/AIReplyButton'
 import { Star, ExternalLink } from 'lucide-react'
-import type { Review } from '@/lib/supabase/types'
+import type { Review } from '@/lib/db-types'
 import { formatRelativeTime, cn } from '@/lib/utils'
 
 interface ReviewCardProps {

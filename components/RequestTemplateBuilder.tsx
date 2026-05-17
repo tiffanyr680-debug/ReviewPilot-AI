@@ -14,8 +14,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { Loader2 } from 'lucide-react'
-import { createClient } from '@/lib/supabase/client'
-import type { RequestTemplate } from '@/lib/supabase/types'
+import type { RequestTemplate } from '@/lib/db-types'
 
 interface Props {
   open: boolean
@@ -33,7 +32,6 @@ export function RequestTemplateBuilder({ open, onOpenChange, template, onSaved }
   const [active, setActive] = useState(template?.active ?? true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const supabase = createClient()
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault()
@@ -50,26 +48,24 @@ export function RequestTemplateBuilder({ open, onOpenChange, template, onSaved }
         active,
       }
 
+      let res: Response
       if (template) {
-        const { data, error: updateError } = await supabase
-          .from('request_templates')
-          .update(payload)
-          .eq('id', template.id)
-          .select()
-          .single()
-        if (updateError) throw updateError
-        onSaved(data)
+        res = await fetch(`/api/templates/${template.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
       } else {
-        const { data: orgId } = await supabase.rpc('get_user_org_id')
-        if (!orgId) throw new Error('No organization found')
-        const { data, error: insertError } = await supabase
-          .from('request_templates')
-          .insert({ ...payload, org_id: orgId })
-          .select()
-          .single()
-        if (insertError) throw insertError
-        onSaved(data)
+        res = await fetch('/api/templates', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
       }
+
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save template')
+      onSaved(data as RequestTemplate)
       onOpenChange(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save template')
