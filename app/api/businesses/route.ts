@@ -1,27 +1,23 @@
-import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { CreateLocationSchema } from '@/lib/validators'
-import { getTierLimits } from '@/lib/utils'
-import type { Plan } from '@/lib/utils'
+import { getTierLimits, type Plan } from '@/lib/utils'
+import { getSession, getCurrentOrgId, newId } from '@/lib/auth'
+import { queryOne, execute, count } from '@/lib/db'
+import type { Location } from '@/lib/db-types'
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createClient()
-
-    // 1. Authenticate user
-    const { data: { session }, error: sessionError } = await supabase.auth.getSession()
-    if (sessionError || !session) {
+    const session = await getSession()
+    if (!session) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    // 2. Get org_id via RPC
-    const { data: orgId, error: orgError } = await supabase.rpc('get_user_org_id')
-    if (orgError || !orgId) {
+    const orgId = await getCurrentOrgId(session.userId)
+    if (!orgId) {
       return NextResponse.json({ error: 'Organization not found' }, { status: 404 })
     }
 
-    // 3. Validate request body
     let body: unknown
     try {
       body = await request.json()
@@ -33,30 +29,23 @@ export async function POST(request: NextRequest) {
     if (!parsed.success) {
       return NextResponse.json(
         { error: 'Validation failed', details: parsed.error.flatten() },
-        { status: 422 }
+        { status: 422 },
       )
     }
 
-    // 4. Check subscription plan and enforce location count limit
-    const { data: subscription } = await supabase
-      .from('subscriptions')
-      .select('plan, status')
-      .eq('org_id', orgId)
-      .single()
-
+    const subscription = await queryOne<{ plan: string }>(
+      'SELECT plan FROM subscriptions WHERE org_id = ?',
+      [orgId],
+    )
     const plan = (subscription?.plan ?? 'starter') as Plan
     const limits = getTierLimits(plan)
 
-    const { count: locationCount, error: countError } = await supabase
-      .from('locations')
-      .select('id', { count: 'exact', head: true })
-      .eq('org_id', orgId)
+    const locationCount = await count(
+      'SELECT COUNT(*) AS c FROM locations WHERE org_id = ?',
+      [orgId],
+    )
 
-    if (countError) {
-      return NextResponse.json({ error: 'Failed to check location count' }, { status: 500 })
-    }
-
-    if ((locationCount ?? 0) >= limits.locations) {
+    if (locationCount >= limits.locations) {
       return NextResponse.json(
         {
           error: `Location limit reached for your ${plan} plan. Upgrade to add more locations.`,
@@ -64,29 +53,26 @@ export async function POST(request: NextRequest) {
           current_count: locationCount,
           limit: limits.locations,
         },
-        { status: 403 }
+        { status: 403 },
       )
     }
 
-    // 5. Insert the new location
-    const { data: location, error: insertError } = await supabase
-      .from('locations')
-      .insert({
-        org_id: orgId,
-        name: parsed.data.name,
-        address: parsed.data.address ?? null,
-        google_place_id: parsed.data.google_place_id ?? null,
-        facebook_page_id: parsed.data.facebook_page_id ?? null,
-      })
-      .select()
-      .single()
+    const id = newId()
+    await execute(
+      `INSERT INTO locations (id, org_id, name, address, google_place_id, facebook_page_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        orgId,
+        parsed.data.name,
+        parsed.data.address ?? null,
+        parsed.data.google_place_id ?? null,
+        parsed.data.facebook_page_id ?? null,
+      ],
+    )
 
-    if (insertError) {
-      console.error('Location insert error:', insertError)
-      return NextResponse.json({ error: 'Failed to create location' }, { status: 500 })
-    }
+    const location = await queryOne<Location>('SELECT * FROM locations WHERE id = ?', [id])
 
-    // 6. Return created location with 201 status
     return NextResponse.json(location, { status: 201 })
   } catch (err) {
     console.error('Unexpected error in POST /api/businesses:', err)
