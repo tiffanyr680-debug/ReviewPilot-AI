@@ -1,41 +1,29 @@
-import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
+import { getSession, getCurrentOrgId } from '@/lib/auth'
+import { queryMany } from '@/lib/db'
+import type { Review } from '@/lib/db-types'
 
 export async function GET() {
   try {
-    const supabase = await createClient()
-
-    // 1. Authenticate user and get org_id
-    const { data: { session }, error: sessionError } = await supabase.auth.getSession()
-    if (sessionError || !session) {
+    const session = await getSession()
+    if (!session) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const { data: orgId, error: orgError } = await supabase.rpc('get_user_org_id')
-    if (orgError || !orgId) {
+    const orgId = await getCurrentOrgId(session.userId)
+    if (!orgId) {
       return NextResponse.json({ error: 'Organization not found' }, { status: 404 })
     }
 
-    // 2. Query negative reviews without replies
-    const { data: alerts, error: alertsError } = await supabase
-      .from('reviews')
-      .select('*')
-      .eq('org_id', orgId)
-      .eq('sentiment', 'negative')
-      .is('reply_content', null)
-      .order('synced_at', { ascending: false })
-      .limit(50)
+    const alerts = await queryMany<Review>(
+      `SELECT * FROM reviews
+        WHERE org_id = ? AND sentiment = 'negative' AND reply_content IS NULL
+        ORDER BY synced_at DESC
+        LIMIT 50`,
+      [orgId],
+    )
 
-    if (alertsError) {
-      console.error('Failed to fetch alerts:', alertsError)
-      return NextResponse.json({ error: 'Failed to fetch alerts' }, { status: 500 })
-    }
-
-    // 3. Return alerts with count
-    return NextResponse.json({
-      alerts: alerts ?? [],
-      count: (alerts ?? []).length,
-    })
+    return NextResponse.json({ alerts, count: alerts.length })
   } catch (err) {
     console.error('Unexpected error in GET /api/alerts:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
