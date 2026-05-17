@@ -1,8 +1,9 @@
-import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { z } from 'zod'
 import { stripe, PRICE_IDS } from '@/lib/stripe/client'
+import { getSession, getCurrentOrgId, newId } from '@/lib/auth'
+import { queryOne, execute } from '@/lib/db'
 
 const CheckoutSchema = z.object({
   plan: z.enum(['starter', 'pro', 'agency']),
@@ -11,25 +12,16 @@ const CheckoutSchema = z.object({
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createClient()
-
-    // 1. Authenticate user and get org_id + email
-    const { data: { session }, error: sessionError } = await supabase.auth.getSession()
-    if (sessionError || !session) {
+    const session = await getSession()
+    if (!session) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const userEmail = session.user.email
-    if (!userEmail) {
-      return NextResponse.json({ error: 'User email is required' }, { status: 400 })
-    }
-
-    const { data: orgId, error: orgError } = await supabase.rpc('get_user_org_id')
-    if (orgError || !orgId) {
+    const orgId = await getCurrentOrgId(session.userId)
+    if (!orgId) {
       return NextResponse.json({ error: 'Organization not found' }, { status: 404 })
     }
 
-    // 2. Validate body
     let body: unknown
     try {
       body = await request.json()
@@ -41,50 +33,41 @@ export async function POST(request: NextRequest) {
     if (!parsed.success) {
       return NextResponse.json(
         { error: 'Validation failed', details: parsed.error.flatten() },
-        { status: 422 }
+        { status: 422 },
       )
     }
 
     const { plan, interval } = parsed.data
-
-    // 3. Get price_id
     const priceId = PRICE_IDS[plan][interval]
     if (!priceId) {
       return NextResponse.json({ error: 'Invalid plan or interval' }, { status: 400 })
     }
 
-    // 4. Look up or create Stripe customer
-    const { data: existingSubscription } = await supabase
-      .from('subscriptions')
-      .select('stripe_customer_id')
-      .eq('org_id', orgId)
-      .single()
+    const existingSubscription = await queryOne<{ stripe_customer_id: string | null }>(
+      'SELECT stripe_customer_id FROM subscriptions WHERE org_id = ?',
+      [orgId],
+    )
 
     let customerId: string
-
     if (existingSubscription?.stripe_customer_id) {
       customerId = existingSubscription.stripe_customer_id
     } else {
       const customer = await stripe.customers.create({
-        email: userEmail,
+        email: session.email,
         metadata: { org_id: orgId },
       })
       customerId = customer.id
 
-      // Upsert subscriptions table with stripe_customer_id
-      await supabase.from('subscriptions').upsert(
-        {
-          org_id: orgId,
-          stripe_customer_id: customerId,
-          plan: 'starter',
-          status: 'incomplete',
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'org_id' }
+      await execute(
+        `INSERT INTO subscriptions (id, org_id, stripe_customer_id, plan, status, updated_at)
+         VALUES (?, ?, ?, 'starter', 'incomplete', ?)
+         ON CONFLICT(org_id) DO UPDATE SET
+           stripe_customer_id = excluded.stripe_customer_id,
+           updated_at = excluded.updated_at`,
+        [newId(), orgId, customerId, new Date().toISOString()],
       )
     }
 
-    // 5. Create Stripe checkout session
     const checkoutSession = await stripe.checkout.sessions.create({
       customer: customerId,
       payment_method_types: ['card'],
@@ -95,7 +78,6 @@ export async function POST(request: NextRequest) {
       metadata: { org_id: orgId },
     })
 
-    // 6. Return checkout URL
     return NextResponse.json({ url: checkoutSession.url })
   } catch (err) {
     console.error('Unexpected error in POST /api/stripe/checkout:', err)
