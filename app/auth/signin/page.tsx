@@ -3,7 +3,6 @@
 import { useState, Suspense } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -21,21 +20,21 @@ function SignInForm() {
     urlError === 'auth_callback_error' ? 'Sign-in link was invalid or expired. Try again.' : null
   )
 
-  const supabase = createClient()
-
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault()
     if (!email) return
     setLoading(true)
     setError(null)
     try {
-      const { error: signInError } = await supabase.auth.signInWithOtp({
-        email,
-        options: {
-          emailRedirectTo: `${window.location.origin}/api/auth/callback`,
-        },
+      const res = await fetch('/api/auth/signin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
       })
-      if (signInError) throw signInError
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error ?? 'Failed to send sign-in link')
+      }
       setSent(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send sign-in link')
