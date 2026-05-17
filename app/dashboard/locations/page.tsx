@@ -1,26 +1,28 @@
-import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+import { getSession, getCurrentOrgId } from '@/lib/auth'
+import { queryMany, queryOne } from '@/lib/db'
 import { LocationsClient } from './LocationsClient'
-import type { Location } from '@/lib/supabase/types'
+import type { Location } from '@/lib/db-types'
 
 export const dynamic = 'force-dynamic'
 
 export default async function LocationsPage() {
-  const supabase = await createClient()
-  const { data: orgId } = await supabase.rpc('get_user_org_id')
+  const session = await getSession()
+  if (!session) redirect('/auth/signin')
+  const orgId = await getCurrentOrgId(session.userId)
   if (!orgId) return <p className="text-sm text-gray-500">Loading…</p>
 
-  const [{ data: locations }, { data: sub }] = await Promise.all([
-    supabase
-      .from('locations')
-      .select('*')
-      .eq('org_id', orgId)
-      .order('created_at', { ascending: false }),
-    supabase.from('subscriptions').select('plan').eq('org_id', orgId).maybeSingle(),
+  const [locations, sub] = await Promise.all([
+    queryMany<Location>(
+      'SELECT * FROM locations WHERE org_id = ? ORDER BY created_at DESC',
+      [orgId],
+    ),
+    queryOne<{ plan: string }>('SELECT plan FROM subscriptions WHERE org_id = ?', [orgId]),
   ])
 
   return (
     <LocationsClient
-      initialLocations={(locations ?? []) as Location[]}
+      initialLocations={locations}
       plan={(sub?.plan ?? 'starter') as 'starter' | 'pro' | 'agency'}
     />
   )

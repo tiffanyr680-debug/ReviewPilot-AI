@@ -1,36 +1,43 @@
-import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+import { getSession, getCurrentOrgId } from '@/lib/auth'
+import { queryMany, queryOne } from '@/lib/db'
 import { RequestsClient } from './RequestsClient'
-import type { RequestTemplate, ReviewRequest, Location } from '@/lib/supabase/types'
+import type { RequestTemplate, ReviewRequest, Location } from '@/lib/db-types'
 
 export const dynamic = 'force-dynamic'
 
 export default async function RequestsPage() {
-  const supabase = await createClient()
-  const { data: orgId } = await supabase.rpc('get_user_org_id')
+  const session = await getSession()
+  if (!session) redirect('/auth/signin')
+  const orgId = await getCurrentOrgId(session.userId)
   if (!orgId) return <p className="text-sm text-gray-500">Loading…</p>
 
-  const [{ data: templates }, { data: recent }, { data: locations }, { data: sub }] =
-    await Promise.all([
-      supabase
-        .from('request_templates')
-        .select('*')
-        .eq('org_id', orgId)
-        .order('created_at', { ascending: false }),
-      supabase
-        .from('review_requests')
-        .select('*')
-        .eq('org_id', orgId)
-        .order('created_at', { ascending: false })
-        .limit(50),
-      supabase.from('locations').select('id, name').eq('org_id', orgId),
-      supabase.from('subscriptions').select('plan').eq('org_id', orgId).maybeSingle(),
-    ])
+  const [templateRows, recent, locations, sub] = await Promise.all([
+    queryMany<Omit<RequestTemplate, 'active'> & { active: number }>(
+      'SELECT * FROM request_templates WHERE org_id = ? ORDER BY created_at DESC',
+      [orgId],
+    ),
+    queryMany<ReviewRequest>(
+      'SELECT * FROM review_requests WHERE org_id = ? ORDER BY created_at DESC LIMIT 50',
+      [orgId],
+    ),
+    queryMany<Pick<Location, 'id' | 'name'>>(
+      'SELECT id, name FROM locations WHERE org_id = ?',
+      [orgId],
+    ),
+    queryOne<{ plan: string }>('SELECT plan FROM subscriptions WHERE org_id = ?', [orgId]),
+  ])
+
+  const templates: RequestTemplate[] = templateRows.map((t) => ({
+    ...t,
+    active: t.active === 1,
+  }))
 
   return (
     <RequestsClient
-      initialTemplates={(templates ?? []) as RequestTemplate[]}
-      recentRequests={(recent ?? []) as ReviewRequest[]}
-      locations={(locations ?? []) as Pick<Location, 'id' | 'name'>[]}
+      initialTemplates={templates}
+      recentRequests={recent}
+      locations={locations}
       plan={(sub?.plan ?? 'starter') as 'starter' | 'pro' | 'agency'}
     />
   )

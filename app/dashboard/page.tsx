@@ -1,50 +1,49 @@
 import Link from 'next/link'
 import { Star, MessageSquare, Send, TrendingUp, MapPin } from 'lucide-react'
-import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+import { getSession, getCurrentOrgId } from '@/lib/auth'
+import { queryMany, count } from '@/lib/db'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { AlertBanner } from '@/components/AlertBanner'
 import { Button } from '@/components/ui/button'
 import { formatRelativeTime, cn } from '@/lib/utils'
-import type { Review } from '@/lib/supabase/types'
+import type { Review } from '@/lib/db-types'
 
 export const dynamic = 'force-dynamic'
 
 export default async function DashboardOverview() {
-  const supabase = await createClient()
-  const { data: orgId } = await supabase.rpc('get_user_org_id')
+  const session = await getSession()
+  if (!session) redirect('/auth/signin')
+  const orgId = await getCurrentOrgId(session.userId)
   if (!orgId) return <p className="text-sm text-gray-500">Setting up your organization…</p>
 
-  const [
-    { data: locations },
-    { count: reviewCount },
-    { data: ratingData },
-    { data: recentReviews },
-    { data: negativeReviews },
-    { count: requestsThisMonth },
-  ] = await Promise.all([
-    supabase.from('locations').select('id, name, rating_avg, review_count').eq('org_id', orgId),
-    supabase.from('reviews').select('id', { count: 'exact', head: true }).eq('org_id', orgId),
-    supabase.from('reviews').select('rating').eq('org_id', orgId).not('rating', 'is', null),
-    supabase
-      .from('reviews')
-      .select('*')
-      .eq('org_id', orgId)
-      .order('posted_at', { ascending: false, nullsFirst: false })
-      .limit(5),
-    supabase
-      .from('reviews')
-      .select('*')
-      .eq('org_id', orgId)
-      .eq('sentiment', 'negative')
-      .is('reply_content', null)
-      .limit(20),
-    supabase
-      .from('review_requests')
-      .select('id', { count: 'exact', head: true })
-      .eq('org_id', orgId)
-      .gte('sent_at', startOfMonthISO()),
-  ])
+  const [locations, reviewCount, ratingData, recentReviews, negativeReviews, requestsThisMonth] =
+    await Promise.all([
+      queryMany<{ id: string; name: string; rating_avg: number | null; review_count: number }>(
+        'SELECT id, name, rating_avg, review_count FROM locations WHERE org_id = ?',
+        [orgId],
+      ),
+      count('SELECT COUNT(*) AS c FROM reviews WHERE org_id = ?', [orgId]),
+      queryMany<{ rating: number | null }>(
+        'SELECT rating FROM reviews WHERE org_id = ? AND rating IS NOT NULL',
+        [orgId],
+      ),
+      queryMany<Review>(
+        'SELECT * FROM reviews WHERE org_id = ? ORDER BY posted_at DESC NULLS LAST LIMIT 5',
+        [orgId],
+      ),
+      queryMany<Review>(
+        `SELECT * FROM reviews
+          WHERE org_id = ? AND sentiment = 'negative' AND reply_content IS NULL
+          LIMIT 20`,
+        [orgId],
+      ),
+      count('SELECT COUNT(*) AS c FROM review_requests WHERE org_id = ? AND sent_at >= ?', [
+        orgId,
+        startOfMonthISO(),
+      ]),
+    ])
 
   const ratings = (ratingData ?? []) as Array<{ rating: number | null }>
   const avgRating = ratings.length
