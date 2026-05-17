@@ -1,78 +1,54 @@
 import { redirect } from 'next/navigation'
-import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { getSession, getCurrentOrgId, newId } from '@/lib/auth'
+import { queryOne, execute, count } from '@/lib/db'
 import { Sidebar } from '@/components/Sidebar'
 import { TopBar } from '@/components/TopBar'
 
-async function ensureOrgForUser(userId: string, userEmail: string | undefined) {
-  const admin = await createServiceClient()
-
-  const { data: existing } = await admin
-    .from('organization_members')
-    .select('org_id')
-    .eq('user_id', userId)
-    .limit(1)
-    .maybeSingle()
-
-  if (existing) return existing.org_id
+async function ensureOrgForUser(userId: string, userEmail: string): Promise<string> {
+  const existing = await getCurrentOrgId(userId)
+  if (existing) return existing
 
   const orgName = userEmail ? `${userEmail.split('@')[0]}'s Business` : 'My Business'
-  const { data: newOrg, error: orgErr } = await admin
-    .from('organizations')
-    .insert({ name: orgName, owner_id: userId })
-    .select('id')
-    .single()
-  if (orgErr || !newOrg) throw new Error('Failed to create organization')
+  const orgId = newId()
 
-  await admin.from('organization_members').insert({
-    org_id: newOrg.id,
-    user_id: userId,
-    role: 'owner',
-  })
+  await execute('INSERT INTO organizations (id, name, owner_id) VALUES (?, ?, ?)', [
+    orgId,
+    orgName,
+    userId,
+  ])
+  await execute(
+    "INSERT INTO organization_members (id, org_id, user_id, role) VALUES (?, ?, ?, 'owner')",
+    [newId(), orgId, userId],
+  )
+  await execute(
+    "INSERT INTO subscriptions (id, org_id, status, plan) VALUES (?, ?, 'trialing', 'starter')",
+    [newId(), orgId],
+  )
 
-  await admin.from('subscriptions').insert({
-    org_id: newOrg.id,
-    status: 'trialing',
-    plan: 'starter',
-  })
-
-  return newOrg.id
+  return orgId
 }
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const session = await getSession()
+  if (!session) redirect('/auth/signin')
 
-  if (!user) redirect('/auth/signin')
+  const orgId = await ensureOrgForUser(session.userId, session.email)
 
-  await ensureOrgForUser(user.id, user.email)
+  const sub = await queryOne<{ plan: string }>(
+    'SELECT plan FROM subscriptions WHERE org_id = ?',
+    [orgId],
+  )
+  const plan = sub?.plan ?? 'starter'
 
-  const { data: orgId } = await supabase.rpc('get_user_org_id')
-
-  let plan = 'starter'
-  if (orgId) {
-    const { data: sub } = await supabase
-      .from('subscriptions')
-      .select('plan')
-      .eq('org_id', orgId)
-      .maybeSingle()
-    plan = sub?.plan ?? 'starter'
-  }
-
-  let alertCount = 0
-  if (orgId) {
-    const { count } = await supabase
-      .from('reviews')
-      .select('id', { count: 'exact', head: true })
-      .eq('org_id', orgId)
-      .eq('sentiment', 'negative')
-      .is('reply_content', null)
-    alertCount = count ?? 0
-  }
+  const alertCount = await count(
+    "SELECT COUNT(*) AS c FROM reviews WHERE org_id = ? AND sentiment = 'negative' AND reply_content IS NULL",
+    [orgId],
+  )
 
   return (
     <div className="min-h-screen bg-gray-50">
       <Sidebar />
-      <TopBar user={user} plan={plan} alertCount={alertCount} />
+      <TopBar user={{ email: session.email }} plan={plan} alertCount={alertCount} />
       <main className="ml-64 pt-16 min-h-screen">
         <div className="p-6 max-w-7xl mx-auto">{children}</div>
       </main>

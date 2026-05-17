@@ -10,12 +10,10 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Badge } from '@/components/ui/badge'
-import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
-import type { User as SupabaseUser } from '@supabase/supabase-js'
 
 interface TopBarProps {
-  user: SupabaseUser
+  user: { email: string }
   plan: string
   alertCount?: number
   title?: string
@@ -23,10 +21,9 @@ interface TopBarProps {
 
 export function TopBar({ user, plan, alertCount = 0, title }: TopBarProps) {
   const router = useRouter()
-  const supabase = createClient()
 
   async function handleSignOut() {
-    await supabase.auth.signOut()
+    await fetch('/api/auth/signout', { method: 'POST' })
     router.push('/auth/signin')
   }
 
