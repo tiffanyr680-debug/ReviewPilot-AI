@@ -1,20 +1,17 @@
-import { createServiceClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
-import { stripe, getPlanFromPriceId } from '@/lib/stripe/client'
 import type Stripe from 'stripe'
+import { stripe, getPlanFromPriceId } from '@/lib/stripe/client'
+import { execute } from '@/lib/db'
+import { newId } from '@/lib/auth'
 
 export async function POST(request: NextRequest) {
-  // 1. Read raw body
   const body = await request.text()
-
-  // 2. Get stripe-signature header
   const sig = request.headers.get('stripe-signature')
   if (!sig) {
     return NextResponse.json({ error: 'Missing stripe-signature header' }, { status: 400 })
   }
 
-  // 3. Construct and verify webhook event
   let event: Stripe.Event
   try {
     event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!)
@@ -24,10 +21,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: `Webhook Error: ${message}` }, { status: 400 })
   }
 
-  // 5. Use service client to bypass RLS for all DB operations
-  const supabase = await createServiceClient()
-
-  // 4. Handle events
   try {
     switch (event.type) {
       case 'checkout.session.completed': {
@@ -40,96 +33,77 @@ export async function POST(request: NextRequest) {
           break
         }
 
-        // Fetch the subscription from Stripe to get price + plan
         const sub = await stripe.subscriptions.retrieve(subscriptionId)
-        const priceId = sub.items.data[0].price.id
-        const plan = getPlanFromPriceId(priceId)
+        const plan = getPlanFromPriceId(sub.items.data[0].price.id)
 
-        // Upsert subscriptions table
-        const { error } = await supabase.from('subscriptions').upsert(
-          {
-            org_id: orgId,
-            stripe_subscription_id: subscriptionId,
-            stripe_customer_id: session.customer as string,
-            status: 'active',
+        await execute(
+          `INSERT INTO subscriptions
+             (id, org_id, stripe_subscription_id, stripe_customer_id, status, plan, current_period_end, updated_at)
+           VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+           ON CONFLICT(org_id) DO UPDATE SET
+             stripe_subscription_id = excluded.stripe_subscription_id,
+             stripe_customer_id     = excluded.stripe_customer_id,
+             status                 = excluded.status,
+             plan                   = excluded.plan,
+             current_period_end     = excluded.current_period_end,
+             updated_at             = excluded.updated_at`,
+          [
+            newId(),
+            orgId,
+            subscriptionId,
+            session.customer as string,
             plan,
-            current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'org_id' }
+            new Date(sub.current_period_end * 1000).toISOString(),
+            new Date().toISOString(),
+          ],
         )
-
-        if (error) {
-          console.error('Failed to upsert subscription on checkout.session.completed:', error)
-        }
         break
       }
 
       case 'customer.subscription.updated': {
         const sub = event.data.object as Stripe.Subscription
-        const priceId = sub.items.data[0].price.id
-        const plan = getPlanFromPriceId(priceId)
+        const plan = getPlanFromPriceId(sub.items.data[0].price.id)
 
-        const { error } = await supabase
-          .from('subscriptions')
-          .update({
-            status: sub.status,
+        await execute(
+          `UPDATE subscriptions
+              SET status = ?, plan = ?, current_period_end = ?, updated_at = ?
+            WHERE stripe_subscription_id = ?`,
+          [
+            sub.status,
             plan,
-            current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
-            updated_at: new Date().toISOString(),
-          })
-          .eq('stripe_subscription_id', sub.id)
-
-        if (error) {
-          console.error('Failed to update subscription on customer.subscription.updated:', error)
-        }
+            new Date(sub.current_period_end * 1000).toISOString(),
+            new Date().toISOString(),
+            sub.id,
+          ],
+        )
         break
       }
 
       case 'customer.subscription.deleted': {
         const sub = event.data.object as Stripe.Subscription
-
-        const { error } = await supabase
-          .from('subscriptions')
-          .update({
-            status: 'inactive',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('stripe_subscription_id', sub.id)
-
-        if (error) {
-          console.error('Failed to update subscription on customer.subscription.deleted:', error)
-        }
+        await execute(
+          'UPDATE subscriptions SET status = ?, updated_at = ? WHERE stripe_subscription_id = ?',
+          ['inactive', new Date().toISOString(), sub.id],
+        )
         break
       }
 
       case 'invoice.payment_failed': {
         const invoice = event.data.object as Stripe.Invoice
-
-        const { error } = await supabase
-          .from('subscriptions')
-          .update({
-            status: 'past_due',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('stripe_subscription_id', invoice.subscription as string)
-
-        if (error) {
-          console.error('Failed to update subscription on invoice.payment_failed:', error)
-        }
+        await execute(
+          'UPDATE subscriptions SET status = ?, updated_at = ? WHERE stripe_subscription_id = ?',
+          ['past_due', new Date().toISOString(), invoice.subscription as string],
+        )
         break
       }
 
       default:
-        // Unhandled event type — not an error, just ignore
         console.log(`Unhandled Stripe event type: ${event.type}`)
     }
   } catch (handlerErr) {
     console.error(`Error handling Stripe event ${event.type}:`, handlerErr)
-    // Return 200 so Stripe doesn't retry — the error is logged for investigation
     return NextResponse.json({ received: true, warning: 'Handler error logged' })
   }
 
-  // 6. Return success
   return NextResponse.json({ received: true })
 }
