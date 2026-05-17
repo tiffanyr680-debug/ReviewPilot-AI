@@ -28,9 +28,8 @@ import {
   TabsTrigger,
 } from '@/components/ui/tabs'
 import { RequestTemplateBuilder } from '@/components/RequestTemplateBuilder'
-import { createClient } from '@/lib/supabase/client'
 import { formatRelativeTime, getTierLimits } from '@/lib/utils'
-import type { RequestTemplate, ReviewRequest, Location } from '@/lib/supabase/types'
+import type { RequestTemplate, ReviewRequest, Location } from '@/lib/db-types'
 
 interface Props {
   initialTemplates: RequestTemplate[]
@@ -45,14 +44,14 @@ export function RequestsClient({ initialTemplates, recentRequests, locations, pl
   const [builderOpen, setBuilderOpen] = useState(false)
   const [editing, setEditing] = useState<RequestTemplate | null>(null)
   const [sendOpen, setSendOpen] = useState(false)
-  const supabase = createClient()
   const limits = getTierLimits(plan)
 
   async function handleDelete(id: string) {
     if (!confirm('Delete this template?')) return
-    const { error } = await supabase.from('request_templates').delete().eq('id', id)
-    if (error) {
-      alert('Failed: ' + error.message)
+    const res = await fetch(`/api/templates/${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      alert('Failed: ' + (data.error ?? 'Unknown error'))
       return
     }
     setTemplates((prev) => prev.filter((t) => t.id !== id))

@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Inbox } from 'lucide-react'
-import type { Review } from '@/lib/supabase/types'
+import type { Review } from '@/lib/db-types'
 
 interface InboxClientProps {
   initialReviews: Review[]

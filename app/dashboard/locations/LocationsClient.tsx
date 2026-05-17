@@ -13,9 +13,8 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
-import { createClient } from '@/lib/supabase/client'
 import { getTierLimits } from '@/lib/utils'
-import type { Location } from '@/lib/supabase/types'
+import type { Location } from '@/lib/db-types'
 
 interface Props {
   initialLocations: Location[]
@@ -26,15 +25,15 @@ export function LocationsClient({ initialLocations, plan }: Props) {
   const [locations, setLocations] = useState(initialLocations)
   const [open, setOpen] = useState(false)
   const [syncing, setSyncing] = useState<string | null>(null)
-  const supabase = createClient()
   const limits = getTierLimits(plan)
   const atLimit = locations.length >= limits.locations
 
   async function handleDelete(id: string) {
     if (!confirm('Delete this location? Reviews and request history will also be removed.')) return
-    const { error } = await supabase.from('locations').delete().eq('id', id)
-    if (error) {
-      alert('Failed to delete: ' + error.message)
+    const res = await fetch(`/api/businesses/${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      alert('Failed to delete: ' + (data.error ?? 'Unknown error'))
       return
     }
     setLocations((prev) => prev.filter((l) => l.id !== id))

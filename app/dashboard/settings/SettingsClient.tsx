@@ -9,7 +9,6 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { PricingTable } from '@/components/PricingTable'
 import { CheckCircle2, Loader2, CreditCard } from 'lucide-react'
-import { createClient } from '@/lib/supabase/client'
 import { formatDate } from '@/lib/utils'
 
 interface Props {
@@ -31,7 +30,6 @@ export function SettingsClient({
   memberCount,
   currentPeriodEnd,
 }: Props) {
-  const supabase = createClient()
   const [orgName, setOrgName] = useState(initialOrgName)
   const [brandVoice, setBrandVoice] = useState(initialBrandVoice)
   const [savingProfile, setSavingProfile] = useState(false)
@@ -45,13 +43,15 @@ export function SettingsClient({
     setProfileSaved(false)
     setProfileError(null)
     try {
-      const { data: orgId } = await supabase.rpc('get_user_org_id')
-      if (!orgId) throw new Error('No org found')
-      const { error } = await supabase
-        .from('organizations')
-        .update({ name: orgName, brand_voice: brandVoice })
-        .eq('id', orgId)
-      if (error) throw error
+      const res = await fetch('/api/org', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: orgName, brand_voice: brandVoice }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error ?? 'Failed to save')
+      }
       setProfileSaved(true)
       setTimeout(() => setProfileSaved(false), 3000)
     } catch (err) {

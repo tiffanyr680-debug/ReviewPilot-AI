@@ -11,8 +11,7 @@ import {
 } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import { Sparkles, Loader2, Send } from 'lucide-react'
-import { createClient } from '@/lib/supabase/client'
-import type { Review } from '@/lib/supabase/types'
+import type { Review } from '@/lib/db-types'
 
 interface Draft {
   tone: 'professional' | 'friendly' | 'formal'
@@ -33,7 +32,6 @@ export function AIReplyButton({ review, brandVoice, onReplySubmitted }: AIReplyB
   const [editedText, setEditedText] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const supabase = createClient()
 
   async function handleOpen() {
     setOpen(true)
@@ -72,11 +70,12 @@ export function AIReplyButton({ review, brandVoice, onReplySubmitted }: AIReplyB
     if (!editedText.trim()) return
     setSubmitting(true)
     try {
-      const { error: dbError } = await supabase
-        .from('reviews')
-        .update({ reply_content: editedText.trim() })
-        .eq('id', review.id)
-      if (dbError) throw dbError
+      const res = await fetch(`/api/reviews/${review.id}/reply`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reply_content: editedText.trim() }),
+      })
+      if (!res.ok) throw new Error('Failed to save reply')
       onReplySubmitted?.(review.id, editedText.trim())
       setOpen(false)
     } catch {

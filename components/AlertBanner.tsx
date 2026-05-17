@@ -2,7 +2,7 @@
 
 import { AlertTriangle, X } from 'lucide-react'
 import { useState } from 'react'
-import type { Review } from '@/lib/supabase/types'
+import type { Review } from '@/lib/db-types'
 
 interface AlertBannerProps {
   negativeReviews: Review[]
