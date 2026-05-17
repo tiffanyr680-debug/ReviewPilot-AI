@@ -41,14 +41,14 @@ export async function createMagicLinkToken(email: string): Promise<string> {
 
 /** Validate and consume a magic-link token. Returns the email on success, else null. */
 export async function consumeMagicLinkToken(token: string): Promise<string | null> {
-  const row = await queryOne<{ id: string; email: string; expires_at: string; used_at: string | null }>(
-    'SELECT id, email, expires_at, used_at FROM auth_tokens WHERE token_hash = ?',
-    [hashToken(token)],
+  const now = new Date().toISOString()
+  const row = await queryOne<{ email: string }>(
+    `UPDATE auth_tokens SET used_at = ?
+      WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
+      RETURNING email`,
+    [now, hashToken(token), now],
   )
-  if (!row || row.used_at) return null
-  if (new Date(row.expires_at).getTime() < Date.now()) return null
-  await execute('UPDATE auth_tokens SET used_at = ? WHERE id = ?', [new Date().toISOString(), row.id])
-  return row.email
+  return row?.email ?? null
 }
 
 // --- users -----------------------------------------------------------------

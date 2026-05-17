@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation'
 import { getSession, getCurrentOrgId, newId } from '@/lib/auth'
-import { queryOne, execute, count } from '@/lib/db'
+import { db, queryOne, count } from '@/lib/db'
 import { Sidebar } from '@/components/Sidebar'
 import { TopBar } from '@/components/TopBar'
 
@@ -11,18 +11,22 @@ async function ensureOrgForUser(userId: string, userEmail: string): Promise<stri
   const orgName = userEmail ? `${userEmail.split('@')[0]}'s Business` : 'My Business'
   const orgId = newId()
 
-  await execute('INSERT INTO organizations (id, name, owner_id) VALUES (?, ?, ?)', [
-    orgId,
-    orgName,
-    userId,
-  ])
-  await execute(
-    "INSERT INTO organization_members (id, org_id, user_id, role) VALUES (?, ?, ?, 'owner')",
-    [newId(), orgId, userId],
-  )
-  await execute(
-    "INSERT INTO subscriptions (id, org_id, status, plan) VALUES (?, ?, 'trialing', 'starter')",
-    [newId(), orgId],
+  await db().batch(
+    [
+      {
+        sql: 'INSERT INTO organizations (id, name, owner_id) VALUES (?, ?, ?)',
+        args: [orgId, orgName, userId],
+      },
+      {
+        sql: "INSERT INTO organization_members (id, org_id, user_id, role) VALUES (?, ?, ?, 'owner')",
+        args: [newId(), orgId, userId],
+      },
+      {
+        sql: "INSERT INTO subscriptions (id, org_id, status, plan) VALUES (?, ?, 'trialing', 'starter')",
+        args: [newId(), orgId],
+      },
+    ],
+    'write',
   )
 
   return orgId
