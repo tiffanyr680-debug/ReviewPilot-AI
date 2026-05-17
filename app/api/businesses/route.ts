@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
       ],
     )
 
-    const location = await queryOne<Location>('SELECT * FROM locations WHERE id = ?', [id])
+    const location = await queryOne<Location>('SELECT * FROM locations WHERE id = ? AND org_id = ?', [id, orgId])
 
     return NextResponse.json(location, { status: 201 })
   } catch (err) {
