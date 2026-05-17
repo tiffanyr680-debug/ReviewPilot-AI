@@ -1,36 +1,28 @@
-import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { SyncReviewsSchema } from '@/lib/validators'
 import { syncGoogleReviews, syncFacebookReviews } from '@/lib/review-sync'
 import { sendNegativeReviewAlert } from '@/lib/email'
+import { getSession, getCurrentOrgId } from '@/lib/auth'
+import { queryMany, queryOne } from '@/lib/db'
 
 export async function POST(request: NextRequest) {
   try {
-    // 1. Determine if cron or authenticated user
     const authHeader = request.headers.get('authorization')
     const isCron = authHeader === `Bearer ${process.env.CRON_SECRET}`
 
     let orgId: string | null = null
-    let supabase: Awaited<ReturnType<typeof createClient>>
-
-    if (isCron) {
-      supabase = await createServiceClient()
-    } else {
-      supabase = await createClient()
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession()
-      if (sessionError || !session) {
+    if (!isCron) {
+      const session = await getSession()
+      if (!session) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
       }
-
-      const { data: userOrgId, error: orgError } = await supabase.rpc('get_user_org_id')
-      if (orgError || !userOrgId) {
+      orgId = await getCurrentOrgId(session.userId)
+      if (!orgId) {
         return NextResponse.json({ error: 'Organization not found' }, { status: 404 })
       }
-      orgId = userOrgId as string
     }
 
-    // 2. Validate body
     let body: unknown
     try {
       body = await request.json()
@@ -42,85 +34,81 @@ export async function POST(request: NextRequest) {
     if (!parsed.success) {
       return NextResponse.json(
         { error: 'Validation failed', details: parsed.error.flatten() },
-        { status: 422 }
+        { status: 422 },
       )
     }
 
     const { location_id } = parsed.data
 
-    // 3 & 4. Build locations query
-    let locationsQuery = supabase
-      .from('locations')
-      .select('id, org_id, google_place_id, facebook_page_id')
-
-    if (isCron) {
-      // Sync ALL locations across all orgs
-      if (location_id) {
-        locationsQuery = locationsQuery.eq('id', location_id)
-      }
-    } else {
-      // User mode: only their org's locations
-      locationsQuery = locationsQuery.eq('org_id', orgId!)
-      if (location_id) {
-        locationsQuery = locationsQuery.eq('id', location_id)
-      }
+    // Build the locations query — cron syncs all orgs, users only their own.
+    let locationsSql =
+      'SELECT id, org_id, google_place_id, facebook_page_id FROM locations'
+    const locationsArgs: string[] = []
+    const where: string[] = []
+    if (!isCron) {
+      where.push('org_id = ?')
+      locationsArgs.push(orgId as string)
     }
-
-    const { data: locations, error: locationsError } = await locationsQuery
-    if (locationsError) {
-      return NextResponse.json({ error: 'Failed to fetch locations' }, { status: 500 })
+    if (location_id) {
+      where.push('id = ?')
+      locationsArgs.push(location_id)
     }
+    if (where.length > 0) locationsSql += ' WHERE ' + where.join(' AND ')
+
+    const locations = await queryMany<{
+      id: string
+      org_id: string
+      google_place_id: string | null
+      facebook_page_id: string | null
+    }>(locationsSql, locationsArgs)
 
     let totalSynced = 0
-
-    // 5. Sync each location
-    for (const loc of (locations ?? []) as Array<{ id: string; org_id: string; google_place_id: string | null; facebook_page_id: string | null }>) {
+    for (const loc of locations) {
       if (loc.google_place_id) {
-        const count = await syncGoogleReviews(supabase, loc.id, loc.org_id, loc.google_place_id)
-        totalSynced += count
+        totalSynced += await syncGoogleReviews(loc.id, loc.org_id, loc.google_place_id)
       }
       if (loc.facebook_page_id) {
-        const count = await syncFacebookReviews(supabase, loc.id, loc.org_id, loc.facebook_page_id)
-        totalSynced += count
+        totalSynced += await syncFacebookReviews(loc.id, loc.org_id, loc.facebook_page_id)
       }
     }
 
-    // 7 & 8. Check for new negative reviews without replies and send alerts
-    if ((locations ?? []).length > 0) {
-      const locationIds = ((locations ?? []) as Array<{ id: string }>).map(l => l.id)
+    // Send alerts for negative reviews without replies.
+    if (locations.length > 0) {
+      const locationIds = locations.map((l) => l.id)
+      const placeholders = locationIds.map(() => '?').join(', ')
+      const negativeReviews = await queryMany<{
+        id: string
+        org_id: string
+        author_name: string | null
+        rating: number | null
+        content: string | null
+        source: string | null
+      }>(
+        `SELECT id, org_id, author_name, rating, content, source
+           FROM reviews
+          WHERE location_id IN (${placeholders})
+            AND rating <= 2 AND sentiment = 'negative' AND reply_content IS NULL`,
+        locationIds,
+      )
 
-      const { data: negativeReviews } = await supabase
-        .from('reviews')
-        .select('id, org_id, location_id, author_name, rating, content, source')
-        .in('location_id', locationIds)
-        .lte('rating', 2)
-        .eq('sentiment', 'negative')
-        .is('reply_content', null)
-
-      // Service-role client required to read auth.users for owner email
-      const adminClient = isCron ? supabase : await createServiceClient()
-      for (const review of negativeReviews ?? []) {
-        const { data: orgData } = await adminClient
-          .from('organizations')
-          .select('name, owner_id')
-          .eq('id', review.org_id)
-          .single()
-
-        if (!orgData?.owner_id) continue
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { data: userResult } = await (adminClient.auth as any).admin.getUserById(orgData.owner_id)
-        const ownerEmail = userResult?.user?.email
-        if (!ownerEmail) continue
+      for (const review of negativeReviews) {
+        const owner = await queryOne<{ name: string; email: string }>(
+          `SELECT o.name AS name, u.email AS email
+             FROM organizations o
+             JOIN users u ON u.id = o.owner_id
+            WHERE o.id = ?`,
+          [review.org_id],
+        )
+        if (!owner?.email) continue
 
         try {
           await sendNegativeReviewAlert(
-            ownerEmail,
-            orgData.name,
+            owner.email,
+            owner.name,
             review.author_name ?? 'Anonymous',
             review.rating ?? 0,
             review.content ?? '',
-            review.source ?? 'unknown'
+            review.source ?? 'unknown',
           )
         } catch (alertErr) {
           console.error('Failed to send negative review alert:', alertErr)
@@ -128,11 +116,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // 9. Return results
-    return NextResponse.json({
-      synced: totalSynced,
-      locations: (locations ?? []).length,
-    })
+    return NextResponse.json({ synced: totalSynced, locations: locations.length })
   } catch (err) {
     console.error('Unexpected error in POST /api/reviews/sync:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
